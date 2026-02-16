@@ -4,4 +4,6 @@ fpdf
 easyocr
 numpy
 Pillow
+
 opencv-python-headless
+st-gsheets-connection
