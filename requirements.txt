@@ -1,0 +1,7 @@
+streamlit
+pandas
+fpdf
+easyocr
+numpy
+Pillow
+opencv-python-headless
