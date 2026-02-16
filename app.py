@@ -7,12 +7,49 @@ import easyocr
 import numpy as np
 from PIL import Image
 import random
+from streamlit_gsheets import GSheetsConnection
 
-# --- FILE PATHS & CONFIG ---
-DB_FILE = "tasks_db.csv"
+# --- APP CONFIG & UI SETUP ---
 ICON_ICO = "icon.ico"
 ICON_PNG = "icon.png"
 THEME_COLOR = "#3498DB"
+
+st.set_page_config(page_title="RRS Daily Task", page_icon=ICON_ICO if os.path.exists(ICON_ICO) else "📝", layout="wide")
+
+st.markdown(f"""
+    <style>
+    .stApp {{ background-color: #F4F7F6; }}
+    .main-header {{ color: #2C3E50; font-family: 'Helvetica Neue', sans-serif; font-weight: bold; }}
+    .quote-box {{ background-color: #EBF5FB; padding: 20px; border-left: 6px solid {THEME_COLOR}; border-radius: 8px; font-style: italic; margin-bottom: 25px; color: #555; font-size: 1.1em; }}
+    </style>
+""", unsafe_allow_html=True)
+
+# --- ICON & RESOURCES ---
+def prepare_resources():
+    if os.path.exists(ICON_ICO) and not os.path.exists(ICON_PNG):
+        try:
+            img = Image.open(ICON_ICO)
+            img.save(ICON_PNG, format="PNG")
+        except Exception:
+            pass
+
+prepare_resources()
+
+# --- GOOGLE SHEETS DATABASE CONNECTION ---
+# This replaces the old CSV logic
+conn = st.connection("gsheets", type=GSheetsConnection)
+df = conn.read(worksheet="Tasks", ttl=0) # ttl=0 forces it to always fetch fresh data
+
+# If the sheet is empty, create the structure
+if df.empty or len(df.columns) == 0:
+    df = pd.DataFrame(columns=["date", "task", "subnotes", "status"])
+
+df.fillna("", inplace=True)
+df['task'] = df['task'].astype(str)
+df['subnotes'] = df['subnotes'].astype(str)
+df['status'] = df['status'].astype(str)
+
+today_str = str(date.today())
 
 QUOTES = [
     "The secret of getting ahead is getting started.",
@@ -24,41 +61,7 @@ QUOTES = [
     "Believe you can and you're halfway there.",
     "Action is the foundational key to all success."
 ]
-
-def prepare_resources():
-    if os.path.exists(ICON_ICO) and not os.path.exists(ICON_PNG):
-        try:
-            img = Image.open(ICON_ICO)
-            img.save(ICON_PNG, format="PNG")
-        except Exception as e:
-            pass
-            
-    if not os.path.exists(DB_FILE):
-        df = pd.DataFrame(columns=["date", "task", "subnotes", "status"])
-        df.to_csv(DB_FILE, index=False)
-
-prepare_resources()
-df = pd.read_csv(DB_FILE)
-df.fillna("", inplace=True)
-df['task'] = df['task'].astype(str)
-df['subnotes'] = df['subnotes'].astype(str)
-df['status'] = df['status'].astype(str)
-
-today_str = str(date.today())
-
-# Removed random.seed() so the quote changes on every single refresh!
 daily_quote = random.choice(QUOTES)
-
-# --- APP UI SETUP & CUSTOM CSS ---
-st.set_page_config(page_title="RRS Daily Task", page_icon=ICON_ICO if os.path.exists(ICON_ICO) else "📝", layout="wide")
-
-st.markdown(f"""
-    <style>
-    .stApp {{ background-color: #F4F7F6; }}
-    .main-header {{ color: #2C3E50; font-family: 'Helvetica Neue', sans-serif; font-weight: bold; }}
-    .quote-box {{ background-color: #EBF5FB; padding: 20px; border-left: 6px solid {THEME_COLOR}; border-radius: 8px; font-style: italic; margin-bottom: 25px; color: #555; font-size: 1.1em; }}
-    </style>
-""", unsafe_allow_html=True)
 
 # --- HEADER SECTION ---
 col1, col2 = st.columns([1, 5])
@@ -81,7 +84,7 @@ with st.expander("➕ Add New Task", expanded=True):
         if st.form_submit_button("Add to Today's List") and new_task.strip() != "":
             new_row = pd.DataFrame([{"date": today_str, "task": new_task.strip(), "subnotes": new_subnotes.strip(), "status": "pending"}])
             df = pd.concat([df, new_row], ignore_index=True)
-            df.to_csv(DB_FILE, index=False)
+            conn.update(worksheet="Tasks", data=df) # Update Google Sheet
             st.rerun()
 
 pending_df = df[df['status'] == 'pending'].copy()
@@ -101,8 +104,8 @@ if not pending_df.empty:
         df = df[df['status'] != 'pending']
         edited_df['date'] = today_str
         df = pd.concat([df, edited_df], ignore_index=True)
-        df.to_csv(DB_FILE, index=False)
-        st.success("Changes Saved!")
+        conn.update(worksheet="Tasks", data=df) # Update Google Sheet
+        st.success("Changes Saved to Cloud!")
         st.rerun()
 
     st.divider()
@@ -189,8 +192,6 @@ if not pending_df.empty:
             pdf.ln(12)
             pdf.line(10, pdf.get_y(), 200, pdf.get_y())
 
-        # Removed the Gratitude Box logic entirely
-
         pdf_name = "daily_focus.pdf"
         pdf.output(pdf_name)
         with open(pdf_name, "rb") as f:
@@ -238,6 +239,6 @@ if uploaded_file:
                 if new_t.strip() != "":
                     new_row = pd.DataFrame([{"date": today_str, "task": new_t.strip(), "subnotes": "", "status": "pending"}])
                     df = pd.concat([df, new_row], ignore_index=True)
-            df.to_csv(DB_FILE, index=False)
+            conn.update(worksheet="Tasks", data=df) # Update Google Sheet
             st.success("Notes added! List updated for tomorrow.")
             st.rerun()
