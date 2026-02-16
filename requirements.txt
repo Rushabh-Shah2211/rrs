@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 streamlit
 pandas
 fpdf
@@ -6,3 +7,14 @@ numpy
 Pillow
 opencv-python-headless
 st-gsheets-connection
+=======
+streamlit
+pandas
+fpdf
+easyocr
+numpy
+Pillow
+opencv-python-headless
+st-gsheets-connection
+
+>>>>>>> 8a785619902f357609ee49f8ee3317e52612f82f
