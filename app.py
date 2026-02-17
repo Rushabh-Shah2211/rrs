@@ -16,6 +16,7 @@ import time
 import re
 from streamlit_gsheets import GSheetsConnection
 import gspread
+from gspread.exceptions import WorksheetNotFound
 
 # --- APP CONFIG & UI SETUP ---
 ICON_ICO = "icon.ico"
@@ -37,59 +38,95 @@ if 'current_date' not in st.session_state:
     st.session_state.current_date = date.today()
 if 'db_initialized' not in st.session_state:
     st.session_state.db_initialized = False
+if 'users_df' not in st.session_state:
+    st.session_state.users_df = None
+if 'tasks_df' not in st.session_state:
+    st.session_state.tasks_df = None
 
 # --- DATABASE INITIALIZATION ---
 def initialize_database():
-    """Initialize Google Sheets with required worksheets"""
+    """Initialize Google Sheets with required worksheets and columns"""
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         
-        # Try to create Users worksheet if it doesn't exist
+        # Define required columns for each worksheet
+        users_columns = ["user_id", "username", "password", "name", "email", "created_date"]
+        tasks_columns = ["user_id", "task_id", "date", "task", "subnotes", "status", "priority", "due_date", "category", "completed_date"]
+        
+        # Initialize Users worksheet
         try:
             users_df = conn.read(worksheet="Users", ttl=0)
             if users_df.empty:
-                users_df = pd.DataFrame(columns=["user_id", "username", "password", "name", "email", "created_date"])
-        except:
-            # Worksheet doesn't exist, create it
-            users_df = pd.DataFrame(columns=["user_id", "username", "password", "name", "email", "created_date"])
+                users_df = pd.DataFrame(columns=users_columns)
+                conn.update(worksheet="Users", data=users_df)
+            else:
+                # Ensure all columns exist
+                for col in users_columns:
+                    if col not in users_df.columns:
+                        users_df[col] = ""
+                conn.update(worksheet="Users", data=users_df)
+        except WorksheetNotFound:
+            users_df = pd.DataFrame(columns=users_columns)
             conn.create_worksheet(title="Users", data=users_df)
+        except Exception as e:
+            st.warning(f"Users worksheet initialization: {str(e)}")
+            users_df = pd.DataFrame(columns=users_columns)
         
-        # Try to create Tasks worksheet if it doesn't exist
+        # Initialize Tasks worksheet
         try:
             tasks_df = conn.read(worksheet="Tasks", ttl=0)
             if tasks_df.empty:
-                tasks_df = pd.DataFrame(columns=["user_id", "task_id", "date", "task", "subnotes", "status", "priority", "due_date", "category", "completed_date"])
-        except:
-            # Worksheet doesn't exist, create it
-            tasks_df = pd.DataFrame(columns=["user_id", "task_id", "date", "task", "subnotes", "status", "priority", "due_date", "category", "completed_date"])
+                tasks_df = pd.DataFrame(columns=tasks_columns)
+                conn.update(worksheet="Tasks", data=tasks_df)
+            else:
+                # Ensure all columns exist
+                for col in tasks_columns:
+                    if col not in tasks_df.columns:
+                        tasks_df[col] = ""
+                conn.update(worksheet="Tasks", data=tasks_df)
+        except WorksheetNotFound:
+            tasks_df = pd.DataFrame(columns=tasks_columns)
             conn.create_worksheet(title="Tasks", data=tasks_df)
+        except Exception as e:
+            st.warning(f"Tasks worksheet initialization: {str(e)}")
+            tasks_df = pd.DataFrame(columns=tasks_columns)
+        
+        # Fill NaN values
+        users_df = users_df.fillna("")
+        tasks_df = tasks_df.fillna("")
         
         st.session_state.db_initialized = True
+        st.session_state.users_df = users_df
+        st.session_state.tasks_df = tasks_df
         return conn, users_df, tasks_df
         
     except Exception as e:
         st.error(f"Database initialization error: {str(e)}")
-        return None, None, None
+        return None, pd.DataFrame(), pd.DataFrame()
 
 # Initialize database
 conn, users_df, tasks_df = initialize_database()
 
-if not st.session_state.db_initialized:
-    st.error("Failed to initialize database. Please check your Google Sheets connection.")
-    st.stop()
+# Store in session state
+if conn is not None:
+    st.session_state.conn = conn
+    st.session_state.users_df = users_df
+    st.session_state.tasks_df = tasks_df
 
 # --- AUTHENTICATION FUNCTIONS ---
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 def authenticate_user(username, password, users_df):
+    if users_df.empty or 'username' not in users_df.columns:
+        return None, None
     user = users_df[users_df['username'] == username]
     if not user.empty and user.iloc[0]['password'] == hash_password(password):
         return user.iloc[0]['user_id'], user.iloc[0]['name']
     return None, None
 
 def register_user(username, password, name, email, users_df):
-    if username in users_df['username'].values:
+    if 'username' in users_df.columns and username in users_df['username'].values:
         return False, "Username already exists"
     
     new_user = pd.DataFrame([{
@@ -100,14 +137,18 @@ def register_user(username, password, name, email, users_df):
         'email': email,
         'created_date': date.today().isoformat()
     }])
-    users_df = pd.concat([users_df, new_user], ignore_index=True)
+    
+    if users_df.empty:
+        users_df = new_user
+    else:
+        users_df = pd.concat([users_df, new_user], ignore_index=True)
+    
     return True, users_df
 
 # --- EMAIL FUNCTIONS ---
 def send_daily_pdf(email, pdf_path, username, task_count):
     """Send PDF via email"""
     try:
-        # Check if email secrets are configured
         if 'email' not in st.secrets:
             st.warning("Email not configured. Please add email settings to .streamlit/secrets.toml")
             return False
@@ -211,15 +252,9 @@ if not st.session_state.authenticated:
                     username = st.text_input("Username", placeholder="Enter your username")
                     password = st.text_input("Password", type="password", placeholder="Enter your password")
                     
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        remember = st.checkbox("Remember me")
-                    with col2:
-                        st.write("")  # Placeholder
-                    
                     if st.form_submit_button("Login", use_container_width=True):
                         if username and password:
-                            user_id, user_name = authenticate_user(username, password, users_df)
+                            user_id, user_name = authenticate_user(username, password, st.session_state.users_df)
                             if user_id:
                                 st.session_state.authenticated = True
                                 st.session_state.username = username
@@ -251,9 +286,10 @@ if not st.session_state.authenticated:
                         elif "@" not in new_email or "." not in new_email:
                             st.error("Please enter a valid email address")
                         else:
-                            success, result = register_user(new_username, new_password, new_name, new_email, users_df)
+                            success, result = register_user(new_username, new_password, new_name, new_email, st.session_state.users_df)
                             if success:
-                                conn.update(worksheet="Users", data=result)
+                                st.session_state.users_df = result
+                                st.session_state.conn.update(worksheet="Users", data=result)
                                 st.success("Registration successful! Please login.")
                                 st.balloons()
                             else:
@@ -264,12 +300,24 @@ if not st.session_state.authenticated:
 # --- MAIN APP (Authenticated) ---
 today_str = str(st.session_state.current_date)
 
-# Filter tasks for current user
-user_tasks_df = tasks_df[tasks_df['user_id'] == st.session_state.user_id].copy()
+# Safely get user tasks
+def get_user_tasks(tasks_df, user_id):
+    """Safely get tasks for a specific user"""
+    if tasks_df.empty:
+        return pd.DataFrame(columns=["user_id", "task_id", "date", "task", "subnotes", "status", "priority", "due_date", "category", "completed_date"])
+    
+    if 'user_id' not in tasks_df.columns:
+        # Add user_id column if missing
+        tasks_df['user_id'] = ""
+        st.session_state.conn.update(worksheet="Tasks", data=tasks_df)
+    
+    return tasks_df[tasks_df['user_id'] == user_id].copy()
+
+user_tasks_df = get_user_tasks(st.session_state.tasks_df, st.session_state.user_id)
 
 # Ensure all required columns exist
-required_columns = ["user_id", "task_id", "date", "task", "subnotes", "status", "priority", "due_date", "category", "completed_date"]
-for col in required_columns:
+required_task_columns = ["user_id", "task_id", "date", "task", "subnotes", "status", "priority", "due_date", "category", "completed_date"]
+for col in required_task_columns:
     if col not in user_tasks_df.columns:
         user_tasks_df[col] = ""
 
@@ -290,7 +338,7 @@ QUOTES = [
 ]
 daily_quote = random.choice(QUOTES)
 
-# --- SIDEBAR WITH USER INFO AND SETTINGS ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.markdown(f"""
         <div style="text-align: center; padding: 20px; background: linear-gradient(135deg, {THEME_COLOR}, #2980b9); border-radius: 10px; color: white;">
@@ -319,13 +367,13 @@ with st.sidebar:
     
     # Quick stats
     st.markdown("#### 📊 Quick Stats")
-    pending_count = len(user_tasks_df[user_tasks_df['status'] == 'pending'])
-    completed_count = len(user_tasks_df[user_tasks_df['status'] == 'closed'])
+    pending_count = len(user_tasks_df[user_tasks_df['status'] == 'pending']) if not user_tasks_df.empty else 0
+    completed_count = len(user_tasks_df[user_tasks_df['status'] == 'closed']) if not user_tasks_df.empty else 0
     total_count = len(user_tasks_df)
     
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("Pending", pending_count, delta=None)
+        st.metric("Pending", pending_count)
         st.metric("Completed", completed_count)
     with col2:
         st.metric("Total", total_count)
@@ -368,18 +416,21 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # Get tasks for selected date
-if selected_category == "All Tasks":
-    today_tasks = user_tasks_df[
-        (user_tasks_df['due_date'] <= today_str) | (user_tasks_df['due_date'] == "")
-    ]
+if not user_tasks_df.empty:
+    if selected_category == "All Tasks":
+        today_tasks = user_tasks_df[
+            (user_tasks_df['due_date'] <= today_str) | (user_tasks_df['due_date'] == "")
+        ]
+    else:
+        today_tasks = user_tasks_df[
+            ((user_tasks_df['due_date'] <= today_str) | (user_tasks_df['due_date'] == "")) &
+            (user_tasks_df['category'] == selected_category)
+        ]
 else:
-    today_tasks = user_tasks_df[
-        ((user_tasks_df['due_date'] <= today_str) | (user_tasks_df['due_date'] == "")) &
-        (user_tasks_df['category'] == selected_category)
-    ]
+    today_tasks = pd.DataFrame()
 
-pending_tasks = today_tasks[today_tasks['status'] == 'pending'].copy()
-completed_tasks = user_tasks_df[user_tasks_df['status'] == 'closed'].copy()
+pending_tasks = today_tasks[today_tasks['status'] == 'pending'].copy() if not today_tasks.empty else pd.DataFrame()
+completed_tasks = user_tasks_df[user_tasks_df['status'] == 'closed'].copy() if not user_tasks_df.empty else pd.DataFrame()
 
 # --- TABS ---
 tab1, tab2, tab3, tab4 = st.tabs(["📝 Today's Tasks", "➕ Add Tasks", "📈 Analytics", "⚙️ Settings"])
@@ -391,67 +442,72 @@ with tab1:
         st.subheader(f"📌 Pending Tasks ({len(pending_tasks)})")
         
         if not pending_tasks.empty:
-            # Sort by priority
-            priority_order = {'High': 0, 'Medium': 1, 'Low': 2}
-            pending_tasks['priority_order'] = pending_tasks['priority'].map(priority_order)
-            pending_tasks = pending_tasks.sort_values('priority_order')
+            # Sort by priority if column exists
+            if 'priority' in pending_tasks.columns:
+                priority_order = {'High': 0, 'Medium': 1, 'Low': 2}
+                pending_tasks['priority_order'] = pending_tasks['priority'].map(priority_order)
+                pending_tasks = pending_tasks.sort_values('priority_order')
             
-            # Display tasks by priority
-            for priority in ['High', 'Medium', 'Low']:
-                priority_tasks = pending_tasks[pending_tasks['priority'] == priority]
-                if not priority_tasks.empty:
-                    priority_colors = {'High': '#ff4444', 'Medium': '#ffbb33', 'Low': '#00C851'}
-                    st.markdown(f"""
-                        <div style='background-color: {priority_colors[priority]}; padding: 5px 10px; border-radius: 5px; color: white; margin: 10px 0;'>
-                            {priority} Priority ({len(priority_tasks)})
-                        </div>
-                    """, unsafe_allow_html=True)
+            for idx, task in pending_tasks.iterrows():
+                with st.container():
+                    col_a, col_b, col_c = st.columns([0.1, 0.7, 0.2])
+                    with col_a:
+                        if st.checkbox("", key=f"complete_{idx}"):
+                            # Mark as completed
+                            if 'task_id' in user_tasks_df.columns and 'task_id' in task:
+                                user_tasks_df.loc[user_tasks_df['task_id'] == task['task_id'], 'status'] = 'closed'
+                                user_tasks_df.loc[user_tasks_df['task_id'] == task['task_id'], 'completed_date'] = today_str
+                            else:
+                                # Fallback if no task_id
+                                user_tasks_df.loc[idx, 'status'] = 'closed'
+                                user_tasks_df.loc[idx, 'completed_date'] = today_str
+                            
+                            # Update Google Sheet
+                            all_tasks = st.session_state.tasks_df[st.session_state.tasks_df['user_id'] != st.session_state.user_id]
+                            all_tasks = pd.concat([all_tasks, user_tasks_df], ignore_index=True)
+                            st.session_state.conn.update(worksheet="Tasks", data=all_tasks)
+                            st.session_state.tasks_df = all_tasks
+                            st.rerun()
                     
-                    for idx, task in priority_tasks.iterrows():
-                        with st.container():
-                            col_a, col_b, col_c = st.columns([0.1, 0.7, 0.2])
-                            with col_a:
-                                if st.checkbox("", key=f"complete_{idx}"):
-                                    # Mark as completed
-                                    user_tasks_df.loc[user_tasks_df['task_id'] == task['task_id'], 'status'] = 'closed'
-                                    user_tasks_df.loc[user_tasks_df['task_id'] == task['task_id'], 'completed_date'] = today_str
-                                    # Update Google Sheet
-                                    all_tasks = tasks_df[tasks_df['user_id'] != st.session_state.user_id]
-                                    all_tasks = pd.concat([all_tasks, user_tasks_df], ignore_index=True)
-                                    conn.update(worksheet="Tasks", data=all_tasks)
-                                    tasks_df = all_tasks
-                                    st.rerun()
-                            
-                            with col_b:
-                                st.markdown(f"**{task['task']}**")
-                                if task['subnotes']:
-                                    st.caption(f"📝 {task['subnotes']}")
-                                if task['category']:
-                                    st.caption(f"🏷️ {task['category']}")
-                            
-                            with col_c:
-                                if task['due_date'] and task['due_date'] != today_str:
-                                    due = datetime.strptime(task['due_date'], '%Y-%m-%d').date()
-                                    days_left = (due - date.today()).days
-                                    if days_left < 0:
-                                        st.markdown(f"<span style='color: #ff4444;'>Overdue!</span>", unsafe_allow_html=True)
-                                    elif days_left == 0:
-                                        st.markdown(f"<span style='color: #ffbb33;'>Today</span>", unsafe_allow_html=True)
-                                    else:
-                                        st.markdown(f"{days_left}d left", unsafe_allow_html=True)
-                            
-                            st.divider()
+                    with col_b:
+                        st.markdown(f"**{task['task']}**")
+                        if task.get('subnotes'):
+                            st.caption(f"📝 {task['subnotes']}")
+                        if task.get('category'):
+                            st.caption(f"🏷️ {task['category']}")
+                        if task.get('priority'):
+                            priority_colors = {'High': '🔴', 'Medium': '🟡', 'Low': '🟢'}
+                            st.caption(f"{priority_colors.get(task['priority'], '⚪')} {task['priority']}")
+                    
+                    with col_c:
+                        if task.get('due_date') and task['due_date'] and task['due_date'] != today_str:
+                            try:
+                                due = datetime.strptime(task['due_date'], '%Y-%m-%d').date()
+                                days_left = (due - date.today()).days
+                                if days_left < 0:
+                                    st.markdown(f"<span style='color: #ff4444;'>Overdue!</span>", unsafe_allow_html=True)
+                                elif days_left == 0:
+                                    st.markdown(f"<span style='color: #ffbb33;'>Today</span>", unsafe_allow_html=True)
+                                else:
+                                    st.markdown(f"{days_left}d left", unsafe_allow_html=True)
+                            except:
+                                pass
+                    
+                    st.divider()
         else:
             st.info("🎉 No pending tasks for today! Time to add some new tasks?")
     
     with col2:
         st.subheader("✅ Completed Today")
-        today_completed = completed_tasks[completed_tasks['completed_date'] == today_str]
-        if not today_completed.empty:
-            for _, task in today_completed.iterrows():
-                st.markdown(f"~~{task['task']}~~")
-                if task['category']:
-                    st.caption(f"🏷️ {task['category']}")
+        if not completed_tasks.empty and 'completed_date' in completed_tasks.columns:
+            today_completed = completed_tasks[completed_tasks['completed_date'] == today_str]
+            if not today_completed.empty:
+                for _, task in today_completed.iterrows():
+                    st.markdown(f"~~{task['task']}~~")
+                    if task.get('category'):
+                        st.caption(f"🏷️ {task['category']}")
+            else:
+                st.info("No tasks completed today yet.")
         else:
             st.info("No tasks completed today yet.")
         
@@ -459,18 +515,22 @@ with tab1:
         
         # Upcoming tasks
         st.subheader("📅 Upcoming")
-        upcoming = user_tasks_df[
-            (user_tasks_df['due_date'] > today_str) & 
-            (user_tasks_df['status'] == 'pending')
-        ].sort_values('due_date').head(5)
-        
-        if not upcoming.empty:
-            for _, task in upcoming.iterrows():
-                due = datetime.strptime(task['due_date'], '%Y-%m-%d').date()
-                days_left = (due - date.today()).days
-                st.markdown(f"• {task['task']} ({days_left}d)")
-        else:
-            st.info("No upcoming tasks")
+        if not user_tasks_df.empty and 'due_date' in user_tasks_df.columns and 'status' in user_tasks_df.columns:
+            upcoming = user_tasks_df[
+                (user_tasks_df['due_date'] > today_str) & 
+                (user_tasks_df['status'] == 'pending')
+            ].sort_values('due_date').head(5)
+            
+            if not upcoming.empty:
+                for _, task in upcoming.iterrows():
+                    try:
+                        due = datetime.strptime(task['due_date'], '%Y-%m-%d').date()
+                        days_left = (due - date.today()).days
+                        st.markdown(f"• {task['task']} ({days_left}d)")
+                    except:
+                        st.markdown(f"• {task['task']}")
+            else:
+                st.info("No upcoming tasks")
 
 with tab2:
     st.subheader("➕ Add New Tasks")
@@ -491,13 +551,11 @@ with tab2:
         
         new_subnotes = st.text_area("Additional Notes", height=100, placeholder="Add any details, links, or notes...")
         
-        col1, col2, col3 = st.columns(3)
-        with col2:
-            submitted = st.form_submit_button("📥 Add Task", use_container_width=True)
+        submitted = st.form_submit_button("📥 Add Task", use_container_width=True)
         
         if submitted:
             if new_task.strip():
-                task_id = hashlib.md5(f"{new_task}{datetime.now()}".encode()).hexdigest()[:12]
+                task_id = hashlib.md5(f"{new_task}{datetime.now()}{random.random()}".encode()).hexdigest()[:12]
                 
                 new_row = pd.DataFrame([{
                     'user_id': st.session_state.user_id,
@@ -512,15 +570,18 @@ with tab2:
                     'completed_date': ""
                 }])
                 
-                user_tasks_df = pd.concat([user_tasks_df, new_row], ignore_index=True)
+                if user_tasks_df.empty:
+                    user_tasks_df = new_row
+                else:
+                    user_tasks_df = pd.concat([user_tasks_df, new_row], ignore_index=True)
                 
                 # Handle repeating tasks
-                if repeat_option != "None" and repeat_option != "None":
+                if repeat_option != "None":
                     current_date = new_due_date
                     while current_date <= repeat_until:
                         current_date += timedelta(days=1 if repeat_option == "Daily" else 7 if repeat_option == "Weekly" else 30)
                         if current_date <= repeat_until:
-                            future_task_id = hashlib.md5(f"{new_task}{current_date}".encode()).hexdigest()[:12]
+                            future_task_id = hashlib.md5(f"{new_task}{current_date}{random.random()}".encode()).hexdigest()[:12]
                             future_row = pd.DataFrame([{
                                 'user_id': st.session_state.user_id,
                                 'task_id': future_task_id,
@@ -536,10 +597,10 @@ with tab2:
                             user_tasks_df = pd.concat([user_tasks_df, future_row], ignore_index=True)
                 
                 # Update Google Sheet
-                all_tasks = tasks_df[tasks_df['user_id'] != st.session_state.user_id]
+                all_tasks = st.session_state.tasks_df[st.session_state.tasks_df['user_id'] != st.session_state.user_id]
                 all_tasks = pd.concat([all_tasks, user_tasks_df], ignore_index=True)
-                conn.update(worksheet="Tasks", data=all_tasks)
-                tasks_df = all_tasks
+                st.session_state.conn.update(worksheet="Tasks", data=all_tasks)
+                st.session_state.tasks_df = all_tasks
                 
                 st.success("✅ Task added successfully!")
                 st.balloons()
@@ -551,69 +612,91 @@ with tab2:
 with tab3:
     st.subheader("📊 Task Analytics")
     
-    # Task completion trend
-    st.markdown("#### 📈 Completion Trend (Last 7 Days)")
-    last_7_days = [(date.today() - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
-    
-    completion_data = []
-    for day in last_7_days:
-        day_completed = len(user_tasks_df[
-            (user_tasks_df['completed_date'] == day) & 
-            (user_tasks_df['status'] == 'closed')
-        ])
-        completion_data.append(day_completed)
-    
-    chart_data = pd.DataFrame({
-        'Date': [d[-5:] for d in last_7_days],  # Show only MM-DD
-        'Completed': completion_data
-    })
-    
-    st.bar_chart(chart_data.set_index('Date'))
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Category distribution
-        st.markdown("#### 📊 Tasks by Category")
-        category_counts = user_tasks_df[user_tasks_df['status'] == 'pending']['category'].value_counts()
-        if not category_counts.empty:
-            st.bar_chart(category_counts)
-        else:
-            st.info("No data available")
-    
-    with col2:
-        # Priority breakdown
-        st.markdown("#### 🎯 Priority Breakdown")
-        priority_counts = user_tasks_df[user_tasks_df['status'] == 'pending']['priority'].value_counts()
-        if not priority_counts.empty:
-            fig_data = pd.DataFrame({
-                'Priority': priority_counts.index,
-                'Count': priority_counts.values
-            }).set_index('Priority')
-            st.bar_chart(fig_data)
-        else:
-            st.info("No data available")
-    
-    # Productivity insights
-    st.markdown("#### 💡 Productivity Insights")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        avg_completed_per_day = len(user_tasks_df[user_tasks_df['status'] == 'closed']) / max(1, (date.today() - datetime.strptime(users_df[users_df['user_id'] == st.session_state.user_id].iloc[0]['created_date'], '%Y-%m-%d').date()).days)
-        st.metric("Avg Tasks/Day", f"{avg_completed_per_day:.1f}")
-    
-    with col2:
-        most_productive_day = user_tasks_df[user_tasks_df['completed_date'] != ""]['completed_date'].value_counts().index[0] if not user_tasks_df[user_tasks_df['completed_date'] != ""].empty else "N/A"
-        st.metric("Best Day", most_productive_day[-5:] if most_productive_day != "N/A" else "N/A")
-    
-    with col3:
-        completion_streak = calculate_streak(user_tasks_df)
-        st.metric("Current Streak", f"{completion_streak} days")
+    if not user_tasks_df.empty and 'completed_date' in user_tasks_df.columns:
+        # Task completion trend
+        st.markdown("#### 📈 Completion Trend (Last 7 Days)")
+        last_7_days = [(date.today() - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+        
+        completion_data = []
+        for day in last_7_days:
+            day_completed = len(user_tasks_df[
+                (user_tasks_df['completed_date'] == day) & 
+                (user_tasks_df['status'] == 'closed')
+            ])
+            completion_data.append(day_completed)
+        
+        chart_data = pd.DataFrame({
+            'Date': [d[-5:] for d in last_7_days],
+            'Completed': completion_data
+        })
+        
+        st.bar_chart(chart_data.set_index('Date'))
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Category distribution
+            st.markdown("#### 📊 Tasks by Category")
+            if 'category' in user_tasks_df.columns and 'status' in user_tasks_df.columns:
+                category_counts = user_tasks_df[user_tasks_df['status'] == 'pending']['category'].value_counts()
+                if not category_counts.empty:
+                    st.bar_chart(category_counts)
+                else:
+                    st.info("No data available")
+        
+        with col2:
+            # Priority breakdown
+            st.markdown("#### 🎯 Priority Breakdown")
+            if 'priority' in user_tasks_df.columns and 'status' in user_tasks_df.columns:
+                priority_counts = user_tasks_df[user_tasks_df['status'] == 'pending']['priority'].value_counts()
+                if not priority_counts.empty:
+                    fig_data = pd.DataFrame({
+                        'Priority': priority_counts.index,
+                        'Count': priority_counts.values
+                    }).set_index('Priority')
+                    st.bar_chart(fig_data)
+                else:
+                    st.info("No data available")
+        
+        # Productivity insights
+        st.markdown("#### 💡 Productivity Insights")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            days_active = 1
+            if not st.session_state.users_df.empty and 'created_date' in st.session_state.users_df.columns:
+                user_data = st.session_state.users_df[st.session_state.users_df['user_id'] == st.session_state.user_id]
+                if not user_data.empty and user_data.iloc[0]['created_date']:
+                    try:
+                        created = datetime.strptime(user_data.iloc[0]['created_date'], '%Y-%m-%d').date()
+                        days_active = max(1, (date.today() - created).days)
+                    except:
+                        pass
+            avg_completed_per_day = len(user_tasks_df[user_tasks_df['status'] == 'closed']) / days_active
+            st.metric("Avg Tasks/Day", f"{avg_completed_per_day:.1f}")
+        
+        with col2:
+            if 'completed_date' in user_tasks_df.columns and not user_tasks_df[user_tasks_df['completed_date'] != ""].empty:
+                most_productive_day = user_tasks_df[user_tasks_df['completed_date'] != ""]['completed_date'].value_counts().index[0]
+                st.metric("Best Day", most_productive_day[-5:] if most_productive_day else "N/A")
+            else:
+                st.metric("Best Day", "N/A")
+        
+        with col3:
+            completion_streak = calculate_streak(user_tasks_df)
+            st.metric("Current Streak", f"{completion_streak} days")
+    else:
+        st.info("No data available for analytics yet. Start adding tasks to see insights!")
 
 with tab4:
     st.subheader("⚙️ Settings")
     
-    user_email = users_df[users_df['user_id'] == st.session_state.user_id].iloc[0]['email']
+    # Get user email safely
+    user_email = ""
+    if not st.session_state.users_df.empty and 'email' in st.session_state.users_df.columns:
+        user_data = st.session_state.users_df[st.session_state.users_df['user_id'] == st.session_state.user_id]
+        if not user_data.empty:
+            user_email = user_data.iloc[0]['email']
     
     with st.form("settings_form"):
         st.markdown("#### 📧 Email Preferences")
@@ -629,9 +712,9 @@ with tab4:
         
         if st.form_submit_button("💾 Save Settings", use_container_width=True):
             # Update user email if changed
-            if new_email != user_email:
-                users_df.loc[users_df['user_id'] == st.session_state.user_id, 'email'] = new_email
-                conn.update(worksheet="Users", data=users_df)
+            if new_email != user_email and not st.session_state.users_df.empty:
+                st.session_state.users_df.loc[st.session_state.users_df['user_id'] == st.session_state.user_id, 'email'] = new_email
+                st.session_state.conn.update(worksheet="Users", data=st.session_state.users_df)
             st.success("Settings saved successfully!")
     
     st.divider()
@@ -652,12 +735,12 @@ with tab4:
     with col2:
         if st.button("Delete Completed Tasks", use_container_width=True, type="secondary"):
             confirm = st.checkbox("Confirm deletion of all completed tasks")
-            if confirm:
+            if confirm and not user_tasks_df.empty:
                 user_tasks_df = user_tasks_df[user_tasks_df['status'] != 'closed']
-                all_tasks = tasks_df[tasks_df['user_id'] != st.session_state.user_id]
+                all_tasks = st.session_state.tasks_df[st.session_state.tasks_df['user_id'] != st.session_state.user_id]
                 all_tasks = pd.concat([all_tasks, user_tasks_df], ignore_index=True)
-                conn.update(worksheet="Tasks", data=all_tasks)
-                tasks_df = all_tasks
+                st.session_state.conn.update(worksheet="Tasks", data=all_tasks)
+                st.session_state.tasks_df = all_tasks
                 st.success("Completed tasks deleted!")
                 st.rerun()
 
@@ -689,7 +772,6 @@ if uploaded_file:
         
         for (bbox, text, prob) in results:
             if prob > 0.3 and len(text.strip()) > 2:
-                # Clean text
                 clean_text = re.sub(r'[^\w\s]', '', text).strip()
                 is_template = any(word in clean_text.lower() for word in template_words)
                 if not is_template and not clean_text.replace(" ", "").isdigit():
@@ -700,9 +782,7 @@ if uploaded_file:
         new_tasks = []
         
         for text in found_text:
-            # Check for completion markers
             if any(mark in text.lower() for mark in ["x", "done", "completed", "✓", "✅", "✔"]):
-                # Remove the marker from text
                 clean_text = re.sub(r'[x✓✅✔]', '', text, flags=re.IGNORECASE).strip()
                 completed_tasks.append(clean_text)
             else:
@@ -717,7 +797,7 @@ if uploaded_file:
             st.markdown("#### ✅ Completed Tasks")
             if completed_tasks:
                 selected_completed = []
-                for i, task in enumerate(completed_tasks[:10]):  # Limit to 10
+                for i, task in enumerate(completed_tasks[:10]):
                     if st.checkbox(task, key=f"comp_{i}"):
                         selected_completed.append(task)
             else:
@@ -727,7 +807,7 @@ if uploaded_file:
             st.markdown("#### 📝 New Tasks to Add")
             if new_tasks:
                 new_task_inputs = []
-                for i, task in enumerate(new_tasks[:10]):  # Limit to 10
+                for i, task in enumerate(new_tasks[:10]):
                     with st.expander(f"Task {i+1}"):
                         edited_task = st.text_input("Task", value=task, key=f"new_task_{i}")
                         task_due = st.date_input("Due Date", value=date.today(), key=f"due_{i}")
@@ -747,9 +827,7 @@ if uploaded_file:
         
         st.divider()
         
-        col1, col2, col3 = st.columns(3)
-        with col2:
-            sync_submit = st.form_submit_button("🚀 Process Evening Sync", use_container_width=True)
+        sync_submit = st.form_submit_button("🚀 Process Evening Sync", use_container_width=True)
         
         if sync_submit:
             changes_made = False
@@ -757,7 +835,6 @@ if uploaded_file:
             # Mark completed tasks
             if 'selected_completed' in locals() and selected_completed:
                 for task_text in selected_completed:
-                    # Find and close matching tasks
                     for idx, task in user_tasks_df[user_tasks_df['status'] == 'pending'].iterrows():
                         if task_text.lower() in task['task'].lower() or task['task'].lower() in task_text.lower():
                             user_tasks_df.loc[idx, 'status'] = 'closed'
@@ -781,15 +858,19 @@ if uploaded_file:
                         'category': task_data['category'],
                         'completed_date': ""
                     }])
-                    user_tasks_df = pd.concat([user_tasks_df, new_row], ignore_index=True)
+                    
+                    if user_tasks_df.empty:
+                        user_tasks_df = new_row
+                    else:
+                        user_tasks_df = pd.concat([user_tasks_df, new_row], ignore_index=True)
                     changes_made = True
             
             if changes_made:
                 # Update Google Sheet
-                all_tasks = tasks_df[tasks_df['user_id'] != st.session_state.user_id]
+                all_tasks = st.session_state.tasks_df[st.session_state.tasks_df['user_id'] != st.session_state.user_id]
                 all_tasks = pd.concat([all_tasks, user_tasks_df], ignore_index=True)
-                conn.update(worksheet="Tasks", data=all_tasks)
-                tasks_df = all_tasks
+                st.session_state.conn.update(worksheet="Tasks", data=all_tasks)
+                st.session_state.tasks_df = all_tasks
                 st.success("✅ Evening sync completed successfully!")
                 st.balloons()
                 time.sleep(2)
@@ -815,7 +896,7 @@ def generate_daily_pdf(tasks_df, user_name):
             self.cell(180, 10, date.today().strftime('%B %d, %Y'), 0, 1, 'R')
             self.ln(10)
     
-    pending_tasks = tasks_df[tasks_df['status'] == 'pending'].copy()
+    pending_tasks = tasks_df[tasks_df['status'] == 'pending'].copy() if not tasks_df.empty else pd.DataFrame()
     
     pdf = StylishPDF()
     pdf.add_page()
@@ -835,40 +916,42 @@ def generate_daily_pdf(tasks_df, user_name):
     pdf.cell(0, 10, "Today's Priorities", ln=True)
     pdf.set_text_color(50, 50, 50)
     
-    y_position = pdf.get_y()
-    
-    for priority in ['High', 'Medium', 'Low']:
-        priority_tasks = pending_tasks[pending_tasks['priority'] == priority]
-        if not priority_tasks.empty:
-            # Priority header
-            pdf.set_font("Helvetica", 'B', 12)
-            priority_colors = {'High': (255, 0, 0), 'Medium': (255, 165, 0), 'Low': (0, 128, 0)}
-            pdf.set_text_color(*priority_colors[priority])
-            pdf.cell(0, 8, f"{priority} Priority", ln=True)
-            pdf.set_text_color(50, 50, 50)
-            
-            # Tasks
-            for _, task in priority_tasks.iterrows():
-                # Checkbox
-                pdf.set_font('zapfdingbats', '', 12)
-                pdf.cell(8, 8, 'o', 0, 0)
+    if not pending_tasks.empty and 'priority' in pending_tasks.columns:
+        for priority in ['High', 'Medium', 'Low']:
+            priority_tasks = pending_tasks[pending_tasks['priority'] == priority]
+            if not priority_tasks.empty:
+                # Priority header
+                pdf.set_font("Helvetica", 'B', 12)
+                priority_colors = {'High': (255, 0, 0), 'Medium': (255, 165, 0), 'Low': (0, 128, 0)}
+                pdf.set_text_color(*priority_colors.get(priority, (50, 50, 50)))
+                pdf.cell(0, 8, f"{priority} Priority", ln=True)
+                pdf.set_text_color(50, 50, 50)
                 
-                # Task title
-                pdf.set_font('Helvetica', 'B', 11)
-                pdf.set_x(18)
-                pdf.cell(0, 8, task['task'], ln=1)
-                
-                # Subnotes
-                if task['subnotes'] and task['subnotes'] != "":
+                # Tasks
+                for _, task in priority_tasks.iterrows():
+                    # Checkbox
+                    pdf.set_font('zapfdingbats', '', 12)
+                    pdf.cell(8, 8, 'o', 0, 0)
+                    
+                    # Task title
+                    pdf.set_font('Helvetica', 'B', 11)
                     pdf.set_x(18)
-                    pdf.set_font('Helvetica', 'I', 9)
-                    pdf.set_text_color(100, 100, 100)
-                    pdf.multi_cell(0, 4, task['subnotes'])
-                    pdf.set_text_color(50, 50, 50)
+                    pdf.cell(0, 8, task['task'], ln=1)
+                    
+                    # Subnotes
+                    if task.get('subnotes') and task['subnotes'] != "":
+                        pdf.set_x(18)
+                        pdf.set_font('Helvetica', 'I', 9)
+                        pdf.set_text_color(100, 100, 100)
+                        pdf.multi_cell(0, 4, task['subnotes'])
+                        pdf.set_text_color(50, 50, 50)
+                    
+                    pdf.ln(2)
                 
-                pdf.ln(2)
-            
-            pdf.ln(5)
+                pdf.ln(5)
+    else:
+        pdf.set_font("Helvetica", '', 12)
+        pdf.cell(0, 10, "No pending tasks for today!", ln=True)
     
     # Incoming tasks section
     pdf.ln(5)
@@ -903,17 +986,23 @@ def generate_daily_pdf(tasks_df, user_name):
 
 def calculate_streak(tasks_df):
     """Calculate current completion streak"""
+    if tasks_df.empty or 'completed_date' not in tasks_df.columns:
+        return 0
+    
     completed_dates = tasks_df[tasks_df['completed_date'] != ""]['completed_date'].unique()
     if len(completed_dates) == 0:
         return 0
     
-    completed_dates = sorted([datetime.strptime(d, '%Y-%m-%d').date() for d in completed_dates], reverse=True)
-    
-    streak = 0
-    current_date = date.today()
-    
-    while current_date in completed_dates:
-        streak += 1
-        current_date -= timedelta(days=1)
-    
-    return streak
+    try:
+        completed_dates = sorted([datetime.strptime(d, '%Y-%m-%d').date() for d in completed_dates], reverse=True)
+        
+        streak = 0
+        current_date = date.today()
+        
+        while current_date in completed_dates:
+            streak += 1
+            current_date -= timedelta(days=1)
+        
+        return streak
+    except:
+        return 0
