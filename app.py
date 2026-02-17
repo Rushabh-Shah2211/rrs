@@ -43,7 +43,258 @@ if 'users_df' not in st.session_state:
 if 'tasks_df' not in st.session_state:
     st.session_state.tasks_df = None
 
-# --- DATABASE INITIALIZATION ---
+# --- HELPER FUNCTIONS (DEFINED FIRST) ---
+
+def calculate_streak(tasks_df):
+    """Calculate current completion streak"""
+    try:
+        if tasks_df is None or tasks_df.empty or 'completed_date' not in tasks_df.columns:
+            return 0
+        
+        completed_dates = tasks_df[tasks_df['completed_date'] != ""]['completed_date'].unique()
+        if len(completed_dates) == 0:
+            return 0
+        
+        try:
+            completed_dates = sorted([datetime.strptime(d, '%Y-%m-%d').date() for d in completed_dates], reverse=True)
+            
+            streak = 0
+            current_date = date.today()
+            
+            while current_date in completed_dates:
+                streak += 1
+                current_date -= timedelta(days=1)
+            
+            return streak
+        except:
+            return 0
+    except:
+        return 0
+
+def generate_daily_pdf(tasks_df, user_name, daily_quote):
+    """Generate PDF for daily tasks"""
+    try:
+        class StylishPDF(FPDF):
+            def header(self):
+                self.set_fill_color(52, 152, 219)
+                self.rect(0, 0, 210, 35, 'F')
+                if os.path.exists(ICON_PNG):
+                    self.image(ICON_PNG, x=10, y=5, w=25)
+                self.set_font('Helvetica', 'B', 24)
+                self.set_text_color(255, 255, 255)
+                self.cell(80)
+                self.cell(100, 15, f'{user_name}\'s Tasks', 0, 1, 'R')
+                self.set_font('Helvetica', '', 14)
+                self.cell(180, 10, date.today().strftime('%B %d, %Y'), 0, 1, 'R')
+                self.ln(10)
+        
+        pending_tasks = tasks_df[tasks_df['status'] == 'pending'].copy() if tasks_df is not None and not tasks_df.empty else pd.DataFrame()
+        
+        pdf = StylishPDF()
+        pdf.add_page()
+        pdf.set_text_color(50, 50, 50)
+        
+        # Quote
+        pdf.set_fill_color(235, 245, 251)
+        pdf.rect(10, pdf.get_y(), 190, 20, 'F')
+        pdf.set_font("Helvetica", 'I', 12)
+        pdf.set_xy(15, pdf.get_y() + 5)
+        pdf.multi_cell(180, 10, txt=f'"{daily_quote}"', align='C')
+        pdf.ln(15)
+        
+        # Tasks by priority
+        pdf.set_font("Helvetica", 'B', 16)
+        pdf.set_text_color(52, 152, 219)
+        pdf.cell(0, 10, "Today's Priorities", ln=True)
+        pdf.set_text_color(50, 50, 50)
+        
+        if not pending_tasks.empty:
+            # Sort by priority if column exists
+            if 'priority' in pending_tasks.columns:
+                priority_order = {'High': 0, 'Medium': 1, 'Low': 2}
+                pending_tasks['priority_order'] = pending_tasks['priority'].map(priority_order)
+                pending_tasks = pending_tasks.sort_values('priority_order')
+            
+            for priority in ['High', 'Medium', 'Low']:
+                if 'priority' in pending_tasks.columns:
+                    priority_tasks = pending_tasks[pending_tasks['priority'] == priority]
+                else:
+                    priority_tasks = pending_tasks
+                
+                if not priority_tasks.empty:
+                    # Priority header
+                    pdf.set_font("Helvetica", 'B', 12)
+                    priority_colors = {'High': (255, 0, 0), 'Medium': (255, 165, 0), 'Low': (0, 128, 0)}
+                    pdf.set_text_color(*priority_colors.get(priority, (50, 50, 50)))
+                    pdf.cell(0, 8, f"{priority} Priority" if 'priority' in pending_tasks.columns else "Tasks", ln=True)
+                    pdf.set_text_color(50, 50, 50)
+                    
+                    # Tasks
+                    for _, task in priority_tasks.iterrows():
+                        # Checkbox
+                        pdf.set_font('zapfdingbats', '', 12)
+                        pdf.cell(8, 8, 'o', 0, 0)
+                        
+                        # Task title
+                        pdf.set_font('Helvetica', 'B', 11)
+                        pdf.set_x(18)
+                        pdf.cell(0, 8, task['task'] if 'task' in task else "Untitled", ln=1)
+                        
+                        # Subnotes
+                        if task.get('subnotes') and task['subnotes'] != "":
+                            pdf.set_x(18)
+                            pdf.set_font('Helvetica', 'I', 9)
+                            pdf.set_text_color(100, 100, 100)
+                            pdf.multi_cell(0, 4, task['subnotes'])
+                            pdf.set_text_color(50, 50, 50)
+                        
+                        pdf.ln(2)
+                    
+                    pdf.ln(5)
+        else:
+            pdf.set_font("Helvetica", '', 12)
+            pdf.cell(0, 10, "No pending tasks for today!", ln=True)
+        
+        # Incoming tasks section
+        pdf.ln(5)
+        pdf.set_font("Helvetica", 'B', 14)
+        pdf.set_text_color(52, 152, 219)
+        pdf.cell(0, 10, "Incoming Tasks & Notes:", ln=True)
+        pdf.set_draw_color(200, 200, 200)
+        pdf.set_text_color(50, 50, 50)
+        
+        # Lines for notes
+        for i in range(5):
+            pdf.ln(8)
+            pdf.cell(10)
+            pdf.cell(0, 0, '', 'B', ln=1)
+        
+        # Gratitude section
+        pdf.ln(10)
+        pdf.set_font("Helvetica", 'B', 12)
+        pdf.set_text_color(52, 152, 219)
+        pdf.cell(0, 8, "Today I am grateful for:", ln=True)
+        pdf.set_text_color(50, 50, 50)
+        
+        for i in range(3):
+            pdf.ln(8)
+            pdf.cell(15)
+            pdf.cell(0, 0, '', 'B', ln=1)
+        
+        # Save PDF
+        pdf_path = f"daily_tasks_{st.session_state.user_id}_{date.today().strftime('%Y%m%d')}.pdf"
+        pdf.output(pdf_path)
+        return pdf_path
+    except Exception as e:
+        st.error(f"PDF generation error: {str(e)}")
+        return None
+
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def authenticate_user(username, password, users_df):
+    try:
+        if users_df is None or users_df.empty or 'username' not in users_df.columns:
+            return None, None
+        user = users_df[users_df['username'] == username]
+        if not user.empty and user.iloc[0]['password'] == hash_password(password):
+            return user.iloc[0]['user_id'], user.iloc[0]['name']
+        return None, None
+    except:
+        return None, None
+
+def register_user(username, password, name, email, users_df):
+    try:
+        if users_df is not None and 'username' in users_df.columns and username in users_df['username'].values:
+            return False, "Username already exists"
+        
+        new_user = pd.DataFrame([{
+            'user_id': hashlib.md5(f"{username}{datetime.now()}".encode()).hexdigest()[:8],
+            'username': username,
+            'password': hash_password(password),
+            'name': name,
+            'email': email,
+            'created_date': date.today().isoformat()
+        }])
+        
+        if users_df is None or users_df.empty:
+            users_df = new_user
+        else:
+            users_df = pd.concat([users_df, new_user], ignore_index=True)
+        
+        return True, users_df
+    except Exception as e:
+        return False, f"Registration error: {str(e)}"
+
+def send_daily_pdf(email, pdf_path, username, task_count):
+    """Send PDF via email"""
+    try:
+        if 'email' not in st.secrets:
+            st.warning("Email not configured. Please add email settings to .streamlit/secrets.toml")
+            return False
+            
+        sender_email = st.secrets["email"]["sender"]
+        sender_password = st.secrets["email"]["password"]
+        smtp_server = st.secrets["email"]["smtp_server"]
+        smtp_port = st.secrets["email"]["smtp_port"]
+        
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = email
+        msg['Subject'] = f"RRS Daily Tasks - {date.today().strftime('%B %d, %Y')}"
+        
+        body = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif;">
+            <div style="background-color: #3498DB; padding: 20px; color: white; text-align: center;">
+                <h2>RRS Daily Task Manager</h2>
+            </div>
+            <div style="padding: 20px;">
+                <h3>Hello {username},</h3>
+                <p>Here are your tasks for today ({date.today().strftime('%B %d, %Y')}).</p>
+                <p><strong>Total Tasks:</strong> {task_count}</p>
+                <p>Print this sheet and keep it on your desk. In the evening, mark completed tasks and add new ones, then scan/upload back to the app.</p>
+                <hr>
+                <p style="color: #666;">Happy tasking!</p>
+                <p><em>RRS Daily Task Manager</em></p>
+            </div>
+        </body>
+        </html>
+        """
+        
+        msg.attach(MIMEText(body, 'html'))
+        
+        with open(pdf_path, 'rb') as f:
+            attach = MIMEApplication(f.read(), _subtype="pdf")
+            attach.add_header('Content-Disposition', 'attachment', filename=os.path.basename(pdf_path))
+            msg.attach(attach)
+        
+        server = smtplib.SMTP(smtp_server, smtp_port)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.send_message(msg)
+        server.quit()
+        
+        return True
+    except Exception as e:
+        st.error(f"Email error: {str(e)}")
+        return False
+
+def get_user_tasks(tasks_df, user_id):
+    """Safely get tasks for a specific user"""
+    try:
+        if tasks_df is None or tasks_df.empty:
+            return pd.DataFrame(columns=["user_id", "task_id", "date", "task", "subnotes", "status", "priority", "due_date", "category", "completed_date"])
+        
+        if 'user_id' not in tasks_df.columns:
+            tasks_df['user_id'] = ""
+            if 'conn' in st.session_state:
+                st.session_state.conn.update(worksheet="Tasks", data=tasks_df)
+        
+        return tasks_df[tasks_df['user_id'] == user_id].copy()
+    except:
+        return pd.DataFrame(columns=["user_id", "task_id", "date", "task", "subnotes", "status", "priority", "due_date", "category", "completed_date"])
+
 def initialize_database():
     """Initialize Google Sheets with required worksheets and columns"""
     try:
@@ -98,13 +349,31 @@ def initialize_database():
         st.session_state.db_initialized = True
         st.session_state.users_df = users_df
         st.session_state.tasks_df = tasks_df
+        st.session_state.conn = conn
         return conn, users_df, tasks_df
         
     except Exception as e:
         st.error(f"Database initialization error: {str(e)}")
         return None, pd.DataFrame(), pd.DataFrame()
 
-# Initialize database
+# --- QUOTES ---
+QUOTES = [
+    "The secret of getting ahead is getting started.",
+    "It always seems impossible until it's done.",
+    "Don't watch the clock; do what it does. Keep going.",
+    "Focus on being productive instead of busy.",
+    "Small steps every day add up to big results.",
+    "Your future is created by what you do today, not tomorrow.",
+    "Believe you can and you're halfway there.",
+    "Action is the foundational key to all success.",
+    "The only way to do great work is to love what you do.",
+    "Start where you are. Use what you have. Do what you can.",
+    "Productivity is never an accident. It is always the result of commitment.",
+    "The key is not to prioritize what's on your schedule, but to schedule your priorities."
+]
+daily_quote = random.choice(QUOTES)
+
+# --- DATABASE INITIALIZATION ---
 conn, users_df, tasks_df = initialize_database()
 
 # Store in session state
@@ -112,93 +381,6 @@ if conn is not None:
     st.session_state.conn = conn
     st.session_state.users_df = users_df
     st.session_state.tasks_df = tasks_df
-
-# --- AUTHENTICATION FUNCTIONS ---
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
-
-def authenticate_user(username, password, users_df):
-    if users_df.empty or 'username' not in users_df.columns:
-        return None, None
-    user = users_df[users_df['username'] == username]
-    if not user.empty and user.iloc[0]['password'] == hash_password(password):
-        return user.iloc[0]['user_id'], user.iloc[0]['name']
-    return None, None
-
-def register_user(username, password, name, email, users_df):
-    if 'username' in users_df.columns and username in users_df['username'].values:
-        return False, "Username already exists"
-    
-    new_user = pd.DataFrame([{
-        'user_id': hashlib.md5(f"{username}{datetime.now()}".encode()).hexdigest()[:8],
-        'username': username,
-        'password': hash_password(password),
-        'name': name,
-        'email': email,
-        'created_date': date.today().isoformat()
-    }])
-    
-    if users_df.empty:
-        users_df = new_user
-    else:
-        users_df = pd.concat([users_df, new_user], ignore_index=True)
-    
-    return True, users_df
-
-# --- EMAIL FUNCTIONS ---
-def send_daily_pdf(email, pdf_path, username, task_count):
-    """Send PDF via email"""
-    try:
-        if 'email' not in st.secrets:
-            st.warning("Email not configured. Please add email settings to .streamlit/secrets.toml")
-            return False
-            
-        sender_email = st.secrets["email"]["sender"]
-        sender_password = st.secrets["email"]["password"]
-        smtp_server = st.secrets["email"]["smtp_server"]
-        smtp_port = st.secrets["email"]["smtp_port"]
-        
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = email
-        msg['Subject'] = f"RRS Daily Tasks - {date.today().strftime('%B %d, %Y')}"
-        
-        body = f"""
-        <html>
-        <body style="font-family: Arial, sans-serif;">
-            <div style="background-color: #3498DB; padding: 20px; color: white; text-align: center;">
-                <h2>RRS Daily Task Manager</h2>
-            </div>
-            <div style="padding: 20px;">
-                <h3>Hello {username},</h3>
-                <p>Here are your tasks for today ({date.today().strftime('%B %d, %Y')}).</p>
-                <p><strong>Total Tasks:</strong> {task_count}</p>
-                <p>Print this sheet and keep it on your desk. In the evening, mark completed tasks and add new ones, then scan/upload back to the app.</p>
-                <hr>
-                <p style="color: #666;">Happy tasking!</p>
-                <p><em>RRS Daily Task Manager</em></p>
-            </div>
-        </body>
-        </html>
-        """
-        
-        msg.attach(MIMEText(body, 'html'))
-        
-        with open(pdf_path, 'rb') as f:
-            attach = MIMEApplication(f.read(), _subtype="pdf")
-            attach.add_header('Content-Disposition', 'attachment', filename=os.path.basename(pdf_path))
-            msg.attach(attach)
-        
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()
-        server.login(sender_email, sender_password)
-        server.send_message(msg)
-        server.quit()
-        
-        return True
-    except Exception as e:
-        st.error(f"Email error: {str(e)}")
-        return False
 
 # --- LOGIN PAGE ---
 if not st.session_state.authenticated:
@@ -300,19 +482,7 @@ if not st.session_state.authenticated:
 # --- MAIN APP (Authenticated) ---
 today_str = str(st.session_state.current_date)
 
-# Safely get user tasks
-def get_user_tasks(tasks_df, user_id):
-    """Safely get tasks for a specific user"""
-    if tasks_df.empty:
-        return pd.DataFrame(columns=["user_id", "task_id", "date", "task", "subnotes", "status", "priority", "due_date", "category", "completed_date"])
-    
-    if 'user_id' not in tasks_df.columns:
-        # Add user_id column if missing
-        tasks_df['user_id'] = ""
-        st.session_state.conn.update(worksheet="Tasks", data=tasks_df)
-    
-    return tasks_df[tasks_df['user_id'] == user_id].copy()
-
+# Get user tasks safely
 user_tasks_df = get_user_tasks(st.session_state.tasks_df, st.session_state.user_id)
 
 # Ensure all required columns exist
@@ -320,23 +490,6 @@ required_task_columns = ["user_id", "task_id", "date", "task", "subnotes", "stat
 for col in required_task_columns:
     if col not in user_tasks_df.columns:
         user_tasks_df[col] = ""
-
-# --- QUOTES ---
-QUOTES = [
-    "The secret of getting ahead is getting started.",
-    "It always seems impossible until it's done.",
-    "Don't watch the clock; do what it does. Keep going.",
-    "Focus on being productive instead of busy.",
-    "Small steps every day add up to big results.",
-    "Your future is created by what you do today, not tomorrow.",
-    "Believe you can and you're halfway there.",
-    "Action is the foundational key to all success.",
-    "The only way to do great work is to love what you do.",
-    "Start where you are. Use what you have. Do what you can.",
-    "Productivity is never an accident. It is always the result of commitment.",
-    "The key is not to prioritize what's on your schedule, but to schedule your priorities."
-]
-daily_quote = random.choice(QUOTES)
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -386,15 +539,18 @@ with st.sidebar:
     st.markdown("#### 📄 Print Tasks")
     if st.button("Generate PDF", use_container_width=True):
         with st.spinner("Generating PDF..."):
-            pdf_path = generate_daily_pdf(user_tasks_df, st.session_state.user_name)
-            with open(pdf_path, "rb") as f:
-                st.download_button(
-                    "📥 Download PDF",
-                    f,
-                    file_name=f"RRS_Tasks_{st.session_state.user_name}_{today_str}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
+            pdf_path = generate_daily_pdf(user_tasks_df, st.session_state.user_name, daily_quote)
+            if pdf_path and os.path.exists(pdf_path):
+                with open(pdf_path, "rb") as f:
+                    st.download_button(
+                        "📥 Download PDF",
+                        f,
+                        file_name=f"RRS_Tasks_{st.session_state.user_name}_{today_str}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+            else:
+                st.error("Failed to generate PDF")
     
     st.divider()
     
@@ -417,15 +573,18 @@ st.markdown(f"""
 
 # Get tasks for selected date
 if not user_tasks_df.empty:
-    if selected_category == "All Tasks":
-        today_tasks = user_tasks_df[
-            (user_tasks_df['due_date'] <= today_str) | (user_tasks_df['due_date'] == "")
-        ]
+    if 'due_date' in user_tasks_df.columns:
+        if selected_category == "All Tasks":
+            today_tasks = user_tasks_df[
+                (user_tasks_df['due_date'] <= today_str) | (user_tasks_df['due_date'] == "")
+            ]
+        else:
+            today_tasks = user_tasks_df[
+                ((user_tasks_df['due_date'] <= today_str) | (user_tasks_df['due_date'] == "")) &
+                (user_tasks_df['category'] == selected_category)
+            ]
     else:
-        today_tasks = user_tasks_df[
-            ((user_tasks_df['due_date'] <= today_str) | (user_tasks_df['due_date'] == "")) &
-            (user_tasks_df['category'] == selected_category)
-        ]
+        today_tasks = user_tasks_df
 else:
     today_tasks = pd.DataFrame()
 
@@ -877,132 +1036,3 @@ if uploaded_file:
                 st.rerun()
             else:
                 st.warning("No changes detected")
-
-# --- HELPER FUNCTIONS ---
-def generate_daily_pdf(tasks_df, user_name):
-    """Generate PDF for daily tasks"""
-    
-    class StylishPDF(FPDF):
-        def header(self):
-            self.set_fill_color(52, 152, 219)
-            self.rect(0, 0, 210, 35, 'F')
-            if os.path.exists(ICON_PNG):
-                self.image(ICON_PNG, x=10, y=5, w=25)
-            self.set_font('Helvetica', 'B', 24)
-            self.set_text_color(255, 255, 255)
-            self.cell(80)
-            self.cell(100, 15, f'{user_name}\'s Tasks', 0, 1, 'R')
-            self.set_font('Helvetica', '', 14)
-            self.cell(180, 10, date.today().strftime('%B %d, %Y'), 0, 1, 'R')
-            self.ln(10)
-    
-    pending_tasks = tasks_df[tasks_df['status'] == 'pending'].copy() if not tasks_df.empty else pd.DataFrame()
-    
-    pdf = StylishPDF()
-    pdf.add_page()
-    pdf.set_text_color(50, 50, 50)
-    
-    # Quote
-    pdf.set_fill_color(235, 245, 251)
-    pdf.rect(10, pdf.get_y(), 190, 20, 'F')
-    pdf.set_font("Helvetica", 'I', 12)
-    pdf.set_xy(15, pdf.get_y() + 5)
-    pdf.multi_cell(180, 10, txt=f'"{daily_quote}"', align='C')
-    pdf.ln(15)
-    
-    # Tasks by priority
-    pdf.set_font("Helvetica", 'B', 16)
-    pdf.set_text_color(52, 152, 219)
-    pdf.cell(0, 10, "Today's Priorities", ln=True)
-    pdf.set_text_color(50, 50, 50)
-    
-    if not pending_tasks.empty and 'priority' in pending_tasks.columns:
-        for priority in ['High', 'Medium', 'Low']:
-            priority_tasks = pending_tasks[pending_tasks['priority'] == priority]
-            if not priority_tasks.empty:
-                # Priority header
-                pdf.set_font("Helvetica", 'B', 12)
-                priority_colors = {'High': (255, 0, 0), 'Medium': (255, 165, 0), 'Low': (0, 128, 0)}
-                pdf.set_text_color(*priority_colors.get(priority, (50, 50, 50)))
-                pdf.cell(0, 8, f"{priority} Priority", ln=True)
-                pdf.set_text_color(50, 50, 50)
-                
-                # Tasks
-                for _, task in priority_tasks.iterrows():
-                    # Checkbox
-                    pdf.set_font('zapfdingbats', '', 12)
-                    pdf.cell(8, 8, 'o', 0, 0)
-                    
-                    # Task title
-                    pdf.set_font('Helvetica', 'B', 11)
-                    pdf.set_x(18)
-                    pdf.cell(0, 8, task['task'], ln=1)
-                    
-                    # Subnotes
-                    if task.get('subnotes') and task['subnotes'] != "":
-                        pdf.set_x(18)
-                        pdf.set_font('Helvetica', 'I', 9)
-                        pdf.set_text_color(100, 100, 100)
-                        pdf.multi_cell(0, 4, task['subnotes'])
-                        pdf.set_text_color(50, 50, 50)
-                    
-                    pdf.ln(2)
-                
-                pdf.ln(5)
-    else:
-        pdf.set_font("Helvetica", '', 12)
-        pdf.cell(0, 10, "No pending tasks for today!", ln=True)
-    
-    # Incoming tasks section
-    pdf.ln(5)
-    pdf.set_font("Helvetica", 'B', 14)
-    pdf.set_text_color(52, 152, 219)
-    pdf.cell(0, 10, "Incoming Tasks & Notes:", ln=True)
-    pdf.set_draw_color(200, 200, 200)
-    pdf.set_text_color(50, 50, 50)
-    
-    # Lines for notes
-    for i in range(5):
-        pdf.ln(8)
-        pdf.cell(10)
-        pdf.cell(0, 0, '', 'B', ln=1)
-    
-    # Gratitude section
-    pdf.ln(10)
-    pdf.set_font("Helvetica", 'B', 12)
-    pdf.set_text_color(52, 152, 219)
-    pdf.cell(0, 8, "Today I am grateful for:", ln=True)
-    pdf.set_text_color(50, 50, 50)
-    
-    for i in range(3):
-        pdf.ln(8)
-        pdf.cell(15)
-        pdf.cell(0, 0, '', 'B', ln=1)
-    
-    # Save PDF
-    pdf_path = f"daily_tasks_{st.session_state.user_id}_{today_str}.pdf"
-    pdf.output(pdf_path)
-    return pdf_path
-
-def calculate_streak(tasks_df):
-    """Calculate current completion streak"""
-    if tasks_df.empty or 'completed_date' not in tasks_df.columns:
-        return 0
-    
-    completed_dates = tasks_df[tasks_df['completed_date'] != ""]['completed_date'].unique()
-    if len(completed_dates) == 0:
-        return 0
-    
-    try:
-        completed_dates = sorted([datetime.strptime(d, '%Y-%m-%d').date() for d in completed_dates], reverse=True)
-        
-        streak = 0
-        current_date = date.today()
-        
-        while current_date in completed_dates:
-            streak += 1
-            current_date -= timedelta(days=1)
-        
-        return streak
-    except:
-        return 0
